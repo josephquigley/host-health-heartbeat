@@ -1,0 +1,40 @@
+name: os-health
+services:
+  os-health:
+    container_name: os-health
+    # Build the image from this repo's source (Dockerfile bakes in os_health.py +
+    # entrypoint.sh). To deploy without a local checkout, point the context at the
+    # repo's git URL at a pinned tag instead:
+    #   context: https://github.com/josephquigley/host-health-heartbeat.git#vX.Y.Z
+    build: .
+    restart: unless-stopped
+    env_file:
+      - ./.env
+    mem_limit: 128m
+    # Make the monitor a poor OOM target: under host memory pressure the kernel
+    # strongly prefers to kill other processes, so the monitor survives long
+    # enough to detect/report the OOM event. (Do NOT disable OOM-kill entirely.)
+    oom_score_adj: -500
+    # Code (os_health.py, crontab) is baked into the image now, not bind-mounted.
+    # Only the state volume and the read-only host paths the checks inspect remain.
+    volumes:
+      - os-health-state:/state
+      - /var/lib/update-notifier:/host/update-notifier:ro
+      - /var/lib/apt/periodic:/host/apt-periodic:ro
+      - /run:/host/run:ro
+      - /var/log:/host/log:ro
+    # Run-once-then-crond command lives in the image (Dockerfile CMD).
+    # os_health.py rewrites /tmp/os-health ("<ok|fail> <epoch>", merged across ALL
+    # categories) on every run. The KERNEL codepath runs every 30 min, so a live
+    # scheduler refreshes the file well inside the 60-minute window below; if it
+    # goes stale (crond died / script hung) the container reads unhealthy.
+    # Healthy = crond alive AND last run recent AND all categories ok.
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep crond >/dev/null 2>&1 && find /tmp/os-health -mmin -60 2>/dev/null | grep -q . && grep -q '^ok ' /tmp/os-health"]
+      interval: 1h
+      timeout: 10s
+      retries: 3
+      start_period: 2m
+
+volumes:
+  os-health-state:

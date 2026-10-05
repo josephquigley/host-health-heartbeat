@@ -1,0 +1,5 @@
+# Allow-list: exclude everything, then re-include only what the image bakes in.
+# Keeps .env (a secret) and the rest of the repo out of the build context.
+*
+!os_health.py
+!entrypoint.sh

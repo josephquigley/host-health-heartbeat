@@ -1,0 +1,63 @@
+# CI for host-health-heartbeat.
+# - test:    run unit tests on pull requests and on pushes to main.
+# - release: on push to main, create the next patch tag + GitHub release.
+#
+# Version scheme: vMAJOR.MINOR.PATCH, auto patch-bump from the latest tag
+# (first release is v0.1.0 if no tag exists). For a minor/major bump, push the
+# tag by hand once (e.g. `git tag v0.2.0 && git push origin v0.2.0`); the next
+# auto-bump follows it. A commit that already carries a v* tag is not re-tagged.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Unit tests
+        run: PYTHONPATH="$GITHUB_WORKSPACE" python -m unittest discover -s tests -p 'test_*.py' -v
+
+  release:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Tag and release next patch version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if git tag --points-at HEAD | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "HEAD already tagged: $(git tag --points-at HEAD | tr '\n' ' ') — skipping"
+            exit 0
+          fi
+          latest=$(git tag -l 'v*.*.*' --sort=-v:refname | head -n1)
+          if [ -z "$latest" ]; then
+            next="v0.1.0"
+          else
+            v=${latest#v}
+            major=$(echo "$v" | cut -d. -f1)
+            minor=$(echo "$v" | cut -d. -f2)
+            patch=$(echo "$v" | cut -d. -f3)
+            next="v${major}.${minor}.$((patch + 1))"
+          fi
+          echo "Latest tag: ${latest:-<none>} -> next: $next"
+          gh release create "$next" --target "$GITHUB_SHA" --title "$next" \
+            --notes "Automated release $next from ${GITHUB_SHA::7}"
