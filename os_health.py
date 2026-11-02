@@ -15,7 +15,7 @@ codepaths, so a kernel-only run never masks a stale security/reboot failure.
 
 Failures are signals only: read-only host access, never restarts anything, never
 raises out of main()."""
-import os, sys, re, json, time, urllib.request
+import os, sys, re, json, time, urllib.error, urllib.request
 
 # ---- host mount points (all read-only) ----
 UPDATES_FILE = os.environ.get("UPDATES_FILE", "/host/update-notifier/updates-available")
@@ -151,17 +151,49 @@ def write_health(path, failed):
         f.write(f"{'fail' if failed else 'ok'} {int(time.time())}\n")
 
 
+# ---- ping retry ----
+# A heartbeat that is lost to a brief blip on the monitor side (timeout, DNS
+# failure, refused connection, 5xx) would otherwise cost a whole period and trip
+# the dead-man's-switch. Retry transient failures with backoff; the waits span
+# ~1.5 min so a short stall on the receiving host is ridden out. Worst case
+# (every attempt times out) stays a few minutes, far inside the 30-min cadence.
+PING_TIMEOUT = 10        # seconds per attempt
+PING_BACKOFF = (5, 20, 60)  # sleep before attempts 2, 3, 4
+
+
+def _ping_retryable(e):
+    """True if a failed ping may succeed on retry. A definitive 4xx (410 =
+    monitor paused, 404 = unknown token) will not, so it is not retried; 408/429
+    and every 5xx are. Network-level errors (timeout, DNS, refused, reset) are."""
+    if isinstance(e, urllib.error.HTTPError):
+        return e.code in (408, 429) or e.code >= 500
+    return True
+
+
 def ping(url, suffix="", body=""):
-    """Best-effort heartbeat ping. Never raises: monitoring must not be able to
-    break the run. No-op when `url` is empty."""
+    """Best-effort heartbeat ping, retried on transient failure. Never raises:
+    monitoring must not be able to break the run. No-op (None) when `url` is
+    empty; otherwise True if a ping was delivered, False if it was given up."""
     if not url:
-        return
+        return None
     full = url + suffix
-    try:
-        data = body.encode("utf8", "ignore")[:100_000] if body else None
-        urllib.request.urlopen(urllib.request.Request(full, data=data, method="POST"), timeout=10).close()
-    except Exception as e:
-        print(f"  ping {suffix or '/'} failed: {type(e).__name__}: {e}", file=sys.stderr)
+    data = body.encode("utf8", "ignore")[:100_000] if body else None
+    attempts = len(PING_BACKOFF) + 1
+    for attempt in range(1, attempts + 1):
+        try:
+            req = urllib.request.Request(full, data=data, method="POST")
+            urllib.request.urlopen(req, timeout=PING_TIMEOUT).close()
+            if attempt > 1:
+                print(f"  ping {suffix or '/'} ok on attempt {attempt}/{attempts}", file=sys.stderr)
+            return True
+        except Exception as e:
+            last = attempt == attempts or not _ping_retryable(e)
+            verdict = "giving up" if last else "retrying"
+            print(f"  ping {suffix or '/'} failed (attempt {attempt}/{attempts}, {verdict}): "
+                  f"{type(e).__name__}: {e}", file=sys.stderr)
+            if last:
+                return False
+            time.sleep(PING_BACKOFF[attempt - 1])
 
 
 # ---------- checks: each returns (ok, fails, info) ----------

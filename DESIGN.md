@@ -136,6 +136,12 @@ For each category in turn:
 2. Print its `info`/`FAIL` lines to stdout/stderr (→ `docker logs`).
 3. Ping **that category's own URL**: bare on success, `/fail` on failure, with the
    category's own detail lines as the request body (capped ~100 KB).
+   A ping that fails transiently — timeout, DNS failure, refused/reset connection,
+   HTTP 408/429/5xx — is **retried** up to 3 more times after waits of 5 s, 20 s and
+   60 s (10 s timeout per attempt; worst case ~2.5 min, far inside the 30-min KERNEL
+   cadence). A definitive 4xx (410 = monitor paused, 404 = unknown token) is not
+   retried. Without the retry, one brief stall on the *receiving* side costs a whole
+   period, and a monitor with less than one period of grace false-alarms.
 
 After the run: write the health-file `/tmp/os-health` = `"<ok|fail> <epoch>"` where
 `fail` means *any* category's **last** status is fail (this is what the Docker
@@ -183,12 +189,18 @@ is a false-alarm generator:
 
 | Category | env var | expected schedule |
 |---|---|---|
-| kernel | `HC_PING_URL_KERNEL` | period **30 min + grace 10 min** |
+| kernel | `HC_PING_URL_KERNEL` | period **30 min + grace 40 min** |
 | security | `HC_PING_URL_SECURITY` | Cron `0 6 * * *` (UTC) / grace ~3h (period 24h) |
 | reboot | `HC_PING_URL_REBOOT` | Cron `0 6 * * *` (UTC) / grace ~3h (period 24h) |
 
 Each monitor receives a ping every time its codepath runs (bare = ok, `/fail` = problem),
 so it goes down on a real failure *and* on a missed heartbeat (monitor/host dead).
+
+**Give the kernel monitor more than one period of grace.** With 30 min + 10 min, a
+single lost ping alerts after 40 min and clears 20 min later on the next ping — a
+recurring false alarm whenever the monitor's host briefly stalls. 30 min + 40 min
+means two consecutive pings must be lost (70 min of silence) before it alerts. A
+monitor that offers "N consecutive failures before alerting" achieves the same.
 
 ## Tunables (`.env`)
 
